@@ -48,7 +48,9 @@ const getHostDB = (req, res, next) => {
 const connectDB = async (req, res, next) => {
   const host = req.headers.host;
   const hostDetails = await req.hostDB.Host.findOne({ host });
-  if (!hostDetails) res.send("Host not found");
+  if (!hostDetails) {
+    return res.send("Host not found");
+  }
 
   const db = hostDetails.db;
   req.tenant = { host, db };
