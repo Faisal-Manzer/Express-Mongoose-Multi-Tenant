@@ -1,33 +1,70 @@
-const unless = require('express-unless');
-const express = require('express');
-const mongoose = require('mongoose');
-const redis = require('redis');
-const parser = require('body-parser');
-const schemas = require('./schema');
-const { promisify } = require('util');
-require('dotenv').config();
+const unless = require("express-unless");
+const express = require("express");
+const mongoose = require("mongoose");
+const parser = require("body-parser");
+const schemas = require("./schema");
+const hostSchema = require("./hostSchema");
 
+require("dotenv").config();
 
 const app = express();
-const client = redis.createClient();
 
-const port = 3000;
-const redisGet = promisify(client.get).bind(client);
+const port = process.env.PORT || 3000;
 const connections = {};
 const dbcache = {};
+let hostDB = null;
+let hostConnection = null;
+
+const getHostDB = (req, res, next) => {
+  if (hostDB && hostConnection) {
+    req.hostDB = hostDB;
+    req.hostConnection = hostConnection;
+    next();
+  }
+
+  const uri = process.env.MONGO_URI.replace("__db__", "xhost");
+  console.log(`Connecting to host db`, uri);
+  const conn = mongoose.createConnection(uri, {
+    useNewUrlParser: true,
+    useUnifiedTopology: true,
+  });
+
+  const models = {};
+  Object.keys(hostSchema).map((model) => {
+    if (hostSchema.hasOwnProperty(model)) {
+      models[model] = conn.model(model, hostSchema[model]);
+    }
+  });
+
+  conn.on("connected", () => {
+    console.log(`Connected to host`);
+
+    req.hostDB = hostDB = models;
+    req.hostConnection = hostConnection = conn;
+    next();
+  });
+};
 
 const connectDB = async (req, res, next) => {
   const host = req.headers.host;
-  const db = await redisGet(`host:${host}`);
-  if (!db) res.send('Host not found');
+  const hostDetails = await req.hostDB.Host.findOne({ host });
+  if (!hostDetails) res.send("Host not found");
+
+  const db = hostDetails.db;
   req.tenant = { host, db };
 
   console.log(`Should connect to ${db}`);
 
   if (!connections[db]) {
-    console.log(`Connecting to ${db}`);
-    const uri = process.env.MONGO_URI.replace('__db__', db);
-    const conn = mongoose.createConnection(uri);
+    console.log(
+      `Connecting to ${db}`,
+      process.env.MONGO_URI.replace("__db__", db)
+    );
+    const uri = process.env.MONGO_URI.replace("__db__", db);
+    const conn = mongoose.createConnection(uri, {
+      useNewUrlParser: true,
+      useUnifiedTopology: true,
+    });
 
     const models = {};
     Object.keys(schemas).map((model) => {
@@ -36,7 +73,7 @@ const connectDB = async (req, res, next) => {
       }
     });
 
-    conn.on('connected', () => {
+    conn.on("connected", () => {
       console.log(`Connected to ${db}`);
       connections[db] = conn;
       req.db = dbcache[db] = models;
@@ -47,44 +84,48 @@ const connectDB = async (req, res, next) => {
     req.db = dbcache[db];
     next();
   }
-}
+};
 connectDB.unless = unless;
 
-app.use(parser.urlencoded({ extended: true, limit: '100mb' }));
-app.use(parser.json({ limit: '100mb' }));
+app.use(parser.urlencoded({ extended: true, limit: "100mb" }));
+app.use(parser.json({ limit: "100mb" }));
 
-app.use(connectDB.unless({ path: ['/add-host'] }));
+app.use(getHostDB);
+app.use(connectDB.unless({ path: ["/add-host"] }));
 
-app.get('', (req, res) => {
+app.get("", (req, res) => {
   res.send(`Hello World host:${req.tenant.host} db:${req.tenant.db}`);
 });
 
-app.post('/create', (req, res) => {
+app.post("/create", (req, res) => {
   const todo = new req.db.Todo({ todo: req.body.todo });
-  todo.save()
+  todo
+    .save()
     .then((obj) => res.send(obj))
     .catch((e) => {
       console.log(e);
-      res.send('Error in creating todo');
+      res.send("Error in creating todo");
     });
 });
 
-app.get('/list', (req, res) => {
+app.get("/list", (req, res) => {
   const query = req.db.Todo.find({});
   query
     .then((obj) => res.send(obj))
     .catch((e) => {
       console.log(e);
-      res.send('Error in finding todos');
+      res.send("Error in finding todos");
     });
 });
 
-
-app.post('/add-host', async (req, res) => {
+app.post("/add-host", async (req, res) => {
   const { host, db } = req.body;
-  const result = await client.set(`host:${host}`, db);
-  console.log({ result });
-  res.send('Done');
+  console.log(req.hostDB);
+  const newHost = new req.hostDB.Host({ host, db });
+
+  await newHost.save();
+  console.log({ newHost });
+  res.send("Done");
 });
 
 const server = app.listen(port, () => {
